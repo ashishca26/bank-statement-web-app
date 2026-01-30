@@ -3,37 +3,51 @@ import pandas as pd
 import re
 from io import BytesIO
 
-st.set_page_config(page_title="Bank Statement Analyzer", layout="wide")
-st.title("🏦 Bank Statement Analyzer – Accounting Intelligence v2.0")
-st.caption("Transferor-wise | Audit & ITR Ready")
+# -------------------------------------------------
+# PAGE CONFIG
+# -------------------------------------------------
+st.set_page_config(
+    page_title="Bank Statement Analyzer",
+    layout="wide"
+)
 
-# ---------------- NOISE CLEANER ----------------
+st.title("🏦 Bank Statement Analyzer – Accounting Intelligence v2.2")
+st.caption("Transferor-wise | CA / ITR / Audit Ready")
+
+# -------------------------------------------------
+# CONSTANTS
+# -------------------------------------------------
+TRANSACTION_WORDS = {
+    "WDL", "DEP", "TFR", "UPI", "IMPS", "NEFT", "RTGS",
+    "DR", "CR", "ATM", "CASH", "CARD", "TXN", "TRANSFER"
+}
+
+# -------------------------------------------------
+# CLEAN NARRATION (REMOVE NOISE)
+# -------------------------------------------------
 def clean_narration(text):
     if pd.isna(text):
         return ""
 
     t = str(text)
 
-    # Remove long reference numbers
+    # Remove long reference-like alphanumeric strings
     t = re.sub(r"\b[A-Z0-9]{8,}\b", " ", t)
 
-    # Remove long digit runs (except phone-UPI)
-    t = re.sub(r"\b\d{12,}\b", " ", t)
+    # Remove long digit runs (UTR, IDs)
+    t = re.sub(r"\b\d{10,}\b", " ", t)
 
     # Replace separators with space
     t = re.sub(r"[\/\-\*\#]", " ", t)
 
-    # Normalize spaces
+    # Normalize whitespace
     t = re.sub(r"\s+", " ", t).strip()
 
     return t
 
-# ---------------- UPI ID EXTRACTOR ----------------
-def extract_upi_id(text):
-    matches = re.findall(r"\b[\w\.\-]{2,}@[\w]{2,}\b", text, flags=re.IGNORECASE)
-    return matches[0] if matches else None
-
-# ---------------- CLASSIFICATION ----------------
+# -------------------------------------------------
+# TRANSACTION CLASSIFICATION
+# -------------------------------------------------
 def classify_transaction(narr):
     n = narr.upper()
 
@@ -54,35 +68,64 @@ def classify_transaction(narr):
 
     return "Unidentified"
 
-# ---------------- PARTY IDENTIFICATION ----------------
+# -------------------------------------------------
+# PARTY / TRANSFEROR IDENTIFICATION
+# -------------------------------------------------
 def identify_party(original_narr):
     cleaned = clean_narration(original_narr)
 
-    # UPI ID has highest priority
-    upi = extract_upi_id(cleaned)
-    if upi:
-        return upi
+    # -----------------------------
+    # 1️⃣ UPI PERSON-FIRST LOGIC
+    # -----------------------------
+    if "UPI" in cleaned.upper():
+        parts = re.split(r"[\/ ]+", cleaned)
 
+        for p in parts:
+            p_clean = re.sub(r"[^A-Za-z\.]", "", p)
+
+            if (
+                len(p_clean) >= 3
+                and p_clean.upper() not in TRANSACTION_WORDS
+                and not p_clean.isupper()
+            ):
+                return p_clean.title()
+
+    # -----------------------------
+    # 2️⃣ FIXED CLASSIFICATIONS
+    # -----------------------------
     tx_type = classify_transaction(cleaned)
-
-    if tx_type in ["Bank Charges", "Bank Interest"]:
+    if tx_type in [
+        "Bank Charges",
+        "Bank Interest",
+        "Cash Deposit",
+        "Cash Withdrawal"
+    ]:
         return tx_type
 
-    if tx_type in ["Cash Deposit", "Cash Withdrawal"]:
-        return tx_type
+    # -----------------------------
+    # 3️⃣ GENERIC NAME EXTRACTION
+    # -----------------------------
+    tokens = re.findall(r"[A-Za-z\.]{3,}", cleaned)
+    meaningful = [
+        t for t in tokens
+        if t.upper() not in TRANSACTION_WORDS
+    ]
 
-    # Try extracting human/entity words
-    words = re.findall(r"[A-Za-z]{3,}", cleaned)
-    if words:
-        return " ".join(words[:3]).title()
+    if meaningful:
+        return meaningful[0].title()
 
-    # Fallback – keep cleaned narration
+    # -----------------------------
+    # 4️⃣ FINAL FALLBACK
+    # -----------------------------
     return cleaned if cleaned else "Unidentified – Review Required"
 
-# ---------------- FILE PROCESSOR ----------------
+# -------------------------------------------------
+# FILE PROCESSING
+# -------------------------------------------------
 def process_file(file):
     df = pd.read_excel(file)
 
+    # Column detection
     col_map = {}
     for c in df.columns:
         cl = c.lower()
@@ -103,14 +146,22 @@ def process_file(file):
     df["Transaction Type"] = df["Cleaned Narration"].apply(classify_transaction)
     df["Party / Transferor"] = df["Original Narration"].apply(identify_party)
 
-    df["Amount"] = df.get("Credit").fillna(0) - df.get("Debit").fillna(0)
+    df["Amount"] = df.get("Credit", 0).fillna(0) - df.get("Debit", 0).fillna(0)
 
     return df[
-        ["Date", "Party / Transferor", "Transaction Type", "Amount",
-         "Original Narration", "Cleaned Narration"]
+        [
+            "Date",
+            "Party / Transferor",
+            "Transaction Type",
+            "Amount",
+            "Original Narration",
+            "Cleaned Narration",
+        ]
     ]
 
-# ---------------- UI ----------------
+# -------------------------------------------------
+# UI
+# -------------------------------------------------
 files = st.file_uploader(
     "Upload Bank Statement Excel Files",
     type=["xlsx"],
@@ -118,7 +169,10 @@ files = st.file_uploader(
 )
 
 if files:
-    all_df = pd.concat([process_file(f) for f in files], ignore_index=True)
+    all_df = pd.concat(
+        [process_file(f) for f in files],
+        ignore_index=True
+    )
 
     summary = (
         all_df.groupby("Party / Transferor", as_index=False)["Amount"]
@@ -127,11 +181,13 @@ if files:
     )
 
     unidentified = all_df[
-        all_df["Party / Transferor"].str.contains("Unidentified", na=False)
+        all_df["Party / Transferor"].str.contains(
+            "Unidentified", na=False
+        )
     ]
 
     tab1, tab2, tab3 = st.tabs(
-        ["📄 Transactions", "📊 Transferor Summary", "⚠️ Review Required"]
+        ["📄 Transactions", "📊 Party-wise Summary", "⚠️ Review Required"]
     )
 
     with tab1:
@@ -143,16 +199,18 @@ if files:
     with tab3:
         st.dataframe(unidentified, use_container_width=True)
 
-    # Excel Download
+    # -------------------------------------------------
+    # EXCEL DOWNLOAD
+    # -------------------------------------------------
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         all_df.to_excel(writer, sheet_name="Transactions", index=False)
-        summary.to_excel(writer, sheet_name="Summary", index=False)
+        summary.to_excel(writer, sheet_name="Party_Summary", index=False)
         unidentified.to_excel(writer, sheet_name="Review_Required", index=False)
 
     st.download_button(
         "⬇️ Download Excel (Accounting Ready)",
         data=output.getvalue(),
-        file_name="Bank_Statement_Analysis_v2.0.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        file_name="Bank_Statement_Analysis_v2.2.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
